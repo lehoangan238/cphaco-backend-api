@@ -1,6 +1,7 @@
 /************************************************************
  * BASE Workflow 11053 → Neon (workflow_job_atct_min)
- * - Chỉ sync các job CHƯA HOÀN THÀNH (status ≠ 10)
+ * - Chỉ sync các job CHƯA HOÀN THÀNH, CHƯA THẤT BẠI
+ *   (bỏ qua: Hoàn thành, Thất bại/Hủy)
  ************************************************************/
 
 import fetch from "node-fetch";
@@ -25,7 +26,7 @@ if (!BASE_ACCESS_TOKEN) {
 interface BaseJob {
   id: string | number;
   title?: string;
-  status?: string | number; // 👈 trạng thái job
+  status?: string | number; // hoặc status_id / job_status tuỳ API
 }
 
 /* ───────── Helpers status ───────── */
@@ -35,19 +36,76 @@ function toNumOrNull(x: any): number | null {
   return Number.isNaN(n) ? null : n;
 }
 
-// status = 10 coi như "Hoàn thành"
-function isCompletedStatus(st: any): boolean {
-  const n = toNumOrNull(st);
-  const s = String(st).toLowerCase();
-  return n === 10 || s === "10" || s === "done" || s === "completed";
+/**
+ * Lấy raw status từ job
+ * Một số API của Base trả:
+ *  - job.status
+ *  - job.status_id
+ *  - job.job_status
+ */
+function getJobStatusRaw(job: any): any {
+  if (!job) return null;
+
+  if (job.status !== undefined && job.status !== null) return job.status;
+  if (job.status_id !== undefined && job.status_id !== null)
+    return job.status_id;
+  if (job.job_status !== undefined && job.job_status !== null)
+    return job.job_status;
+
+  return null;
 }
 
-/** Parse title dạng "Label: Value &middot; Label2:: Value2 ..." */
+// status = 10 coi như "Hoàn thành"
+function isCompletedStatus(st: any): boolean {
+  if (st === null || st === undefined) return false;
+
+  const n = toNumOrNull(st);
+  const s = String(st).toLowerCase().trim();
+
+  // Các trường hợp numeric
+  if (n === 10) return true; // trạng thái 10 = Hoàn thành
+  // Nếu hệ thống bạn dùng 100 là hoàn thành thì mở dòng dưới:
+  // if (n === 100) return true;
+
+  // Các trường hợp string
+  if (s === "10") return true;
+  if (s === "done" || s === "completed") return true;
+  if (s.includes("hoàn thành")) return true; // "Hoàn thành", "Đã hoàn thành",...
+
+  return false;
+}
+
+// status thất bại / huỷ → không giữ trong bảng
+function isFailedStatus(st: any): boolean {
+  if (st === null || st === undefined) return false;
+
+  const n = toNumOrNull(st);
+  const s = String(st).toLowerCase().trim();
+
+  // Numeric: thường trạng thái âm là failed / cancel
+  if (n !== null && n < 0) return true; // -10, -1, ...
+
+  // String: tuỳ cách đặt trong Base
+  if (s.includes("thất bại")) return true;
+  if (s.includes("hủy") || s.includes("huỷ")) return true;
+  if (s.includes("cancel")) return true;
+  if (s.includes("failed") || s.includes("failure")) return true;
+
+  return false;
+}
+
+/* ───────── Parse title ───────── */
+
+/**
+ * Parse title dạng "Label: Value · Label2: Value2 ..."
+ * Lưu ý: Base thường trả kí tự "·" (U+00B7), không phải chuỗi "&middot;"
+ */
 function parseTitleToMap(title: string | undefined): Record<string, string> {
   const result: Record<string, string> = {};
   if (!title) return result;
 
-  const parts = title.split("&middot;");
+  // Tách theo cả "·" thật lẫn chuỗi "&middot;" cho chắc
+  const parts = title.split(/(?:·|&middot;)/);
 
   for (let rawPart of parts) {
     let part = rawPart.trim();
@@ -135,9 +193,9 @@ async function fetchJobsPage(pageId: number): Promise<BaseJob[]> {
 
   const form = new URLSearchParams();
   form.append("access_token", BASE_ACCESS_TOKEN);
-  form.append("id", String(WORKFLOW_ID));         // workflow_id
-  form.append("page_id", String(pageId));         // 0,1,2,...
-  form.append("limit", String(PAGE_SIZE));        // số job / trang
+  form.append("id", String(WORKFLOW_ID));   // workflow_id
+  form.append("page_id", String(pageId));   // 0,1,2,...
+  form.append("limit", String(PAGE_SIZE));  // số job / trang
 
   const res = await fetch(url, {
     method: "POST",
@@ -228,7 +286,7 @@ async function upsertAtctRow(row: ReturnType<typeof mapJobToAtctRow>) {
   await pool.query(sql, params);
 }
 
-/** Xoá job khỏi bảng (dùng cho job đã hoàn thành) */
+/** Xoá job khỏi bảng (dùng cho job đã hoàn thành / thất bại / huỷ) */
 async function deleteAtctRow(jobId: string) {
   const sql = `
     DELETE FROM workflow_job_atct_min
@@ -237,7 +295,7 @@ async function deleteAtctRow(jobId: string) {
   await pool.query(sql, [WORKFLOW_ID, jobId]);
 }
 
-/** Full sync: chỉ giữ job chưa hoàn thành */
+/** Full sync: chỉ giữ job active (không hoàn thành, không thất bại) */
 export async function fullSync11053Atct(): Promise<number> {
   console.log(`[11053-ATCT] Start full sync workflow ${WORKFLOW_ID}`);
 
@@ -254,14 +312,21 @@ export async function fullSync11053Atct(): Promise<number> {
     }
 
     for (const job of jobs) {
-      const status = (job as any).status;
+      const rawStatus = getJobStatusRaw(job);
 
-      if (isCompletedStatus(status)) {
-        // Job đã hoàn thành: đảm bảo không còn trong bảng
+      // 1) Đã hoàn thành → xoá khỏi bảng
+      if (isCompletedStatus(rawStatus)) {
         await deleteAtctRow(String(job.id));
         continue;
       }
 
+      // 2) Thất bại / bị huỷ → cũng xoá luôn
+      if (isFailedStatus(rawStatus)) {
+        await deleteAtctRow(String(job.id));
+        continue;
+      }
+
+      // 3) Còn lại (đang chạy, pending, ...) → giữ trong bảng
       const row = mapJobToAtctRow(job);
       await upsertAtctRow(row);
       total++;
