@@ -11,7 +11,22 @@ import cors from "cors";
 config();
 
 const app = express();
-app.use(cors({ origin: "*" }));  // dev cho nhanh, sau này có thể siết lại origin
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Origin", "*");
+  res.header(
+    "Access-Control-Allow-Methods",
+    "GET,POST,PUT,DELETE,OPTIONS"
+  );
+  res.header(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, ngrok-skip-browser-warning"
+  );
+
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(200);
+  }
+  next();
+});
 app.use(express.json());
 
 // Health check – test DB ok chưa
