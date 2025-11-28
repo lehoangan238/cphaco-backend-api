@@ -18,14 +18,7 @@ const BASE_DOMAIN = process.env.BASE_DOMAIN || "base.vn";
 const BASE_ACCESS_TOKEN = (process.env.BASE_ACCESS_TOKEN || "").trim();
 const PAGE_SIZE = 50;
 
-if (!BASE_ACCESS_TOKEN) {
-  console.warn("[11053-ATCT] ⚠ BASE_ACCESS_TOKEN is empty");
-} else {
-  console.log(
-    "[11053-ATCT] Using BASE_ACCESS_TOKEN prefix:",
-    BASE_ACCESS_TOKEN.slice(0, 15) + "..."
-  );
-}
+
 
 interface BaseJob {
   id: string | number;
