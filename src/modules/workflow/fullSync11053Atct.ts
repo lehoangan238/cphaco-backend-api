@@ -382,3 +382,57 @@ export async function fullSync11053Atct(): Promise<number> {
   );
   return total;
 }
+export async function fetchJobDetailAtct(jobId: string) {
+  const url = `https://workflow.${BASE_DOMAIN}/extapi/v1/workflow/job/detail`;
+
+  const form = new URLSearchParams();
+  form.append("access_token", BASE_ACCESS_TOKEN);
+  form.append("id", String(jobId));  // job_id
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: form.toString(),
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`[11053-ATCT] fetchJobDetail error: ${res.status} ${text}`);
+  }
+
+  const data = await res.json();
+
+  if (data.code !== 1 || !data.job) {
+    throw new Error(
+      `[11053-ATCT] fetchJobDetail: Invalid response (${data.message})`
+    );
+  }
+
+  return data.job;
+}
+
+/* ============================================================================
+ *  XỬ LÝ 1 JOB ĐƠN LẺ — processJob11053Atct(jobDetail)
+ * ==========================================================================*/
+
+export async function processJob11053Atct(job: any) {
+  const rawStatus = getJobStatusRaw(job);
+
+  // Nếu job completed → xoá
+  if (isCompletedStatus(rawStatus)) {
+    await deleteAtctRow(String(job.id));
+    return { deleted: true };
+  }
+
+  // Nếu job failed/canceled → xoá
+  if (isFailedStatus(rawStatus)) {
+    await deleteAtctRow(String(job.id));
+    return { deleted: true };
+  }
+
+  // Còn lại → upsert
+  const row = mapJobToAtctRow(job);
+  await upsertAtctRow(row);
+
+  return { upserted: true };
+}
