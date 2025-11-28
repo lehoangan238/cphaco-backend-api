@@ -1,20 +1,37 @@
-// src/modules/workflow/webhook11053Atct.ts
-
 import { Request, Response } from "express";
 import {
+  fullSync11053Atct,
   fetchJobDetailAtct,
   processJob11053Atct,
 } from "./fullSync11053Atct";
 
 /**
- * Chuẩn hóa check job payload giống webhook 11055
+ * Hàm thông minh hơn để lấy Job Object từ Webhook Payload
+ * Cập nhật: Bắt được trường hợp Base gửi Job object ngay tại root payload (Case 0)
  */
+
 function extractJobFromWebhook(payload: any): any | null {
   if (!payload || typeof payload !== "object") return null;
 
-  if (payload.job && typeof payload.job === "object") return payload.job;
-  if (payload.data?.job && typeof payload.data.job === "object")
+  // Case 0: Payload CHÍNH LÀ Job (Trường hợp log của bạn: {"id":"...", "type":"workflowjobs", ...})
+  // Nhận diện: có 'id' VÀ ('type'='workflowjobs' HOẶC có 'title')
+  if (payload.id && (payload.type === 'workflowjobs' || payload.title || payload.name)) {
+    return payload;
+  }
+
+  // Case 1: Job nằm trong payload.job (thường thấy ở action comment/update)
+  if (payload.job && typeof payload.job === "object" && payload.job.id) return payload.job;
+
+  // Case 2: Job nằm trong payload.data.job
+  if (payload.data?.job && typeof payload.data.job === "object" && payload.data.job.id)
     return payload.data.job;
+
+  // Case 3: Job nằm trong payload.data (nếu data là object chứa thông tin job)
+  if (payload.data && typeof payload.data === "object" && payload.data.id) {
+     return payload.data;
+  }
+
+  // Case 4: Legacy (cấu trúc cũ)
   if (payload.data?.item && typeof payload.data.item === "object")
     return payload.data.item;
   if (payload.item && typeof payload.item === "object") return payload.item;
@@ -22,7 +39,10 @@ function extractJobFromWebhook(payload: any): any | null {
   return null;
 }
 
+/** Lấy job_id từ payload nếu Base chỉ gửi ID */
 function extractJobIdFromWebhook(payload: any): string | null {
+  if (!payload || typeof payload !== "object") return null;
+
   const cand =
     payload.job_id ??
     payload.id ??
@@ -36,47 +56,65 @@ function extractJobIdFromWebhook(payload: any): string | null {
 }
 
 /**
- * Webhook xử lý realtime workflow 11053 (An táng / Cải táng)
+ * Webhook cho workflow 11053 (AT/CT)
  */
 export async function webhook11053Atct(req: Request, res: Response) {
   try {
     const body = req.body || {};
-    const preview = (JSON.stringify(body) || "").slice(0, 500);
-    console.log("[11053-ATCT-webhook] payload:", preview);
+    
+    // LOG DEBUG: Xem cấu trúc payload nhận được
+    console.log("---------------------------------------------------------");
+    console.log(`[11053-WEBHOOK] Time: ${new Date().toISOString()}`);
+    console.log(`[11053-WEBHOOK] Payload ID: ${body.id || body.data?.id || "unknown"}`);
 
-    // 1) Nếu webhook gửi FULL JOB → xử lý trực tiếp
+    // 1) Cố gắng lấy Full Job từ Payload (Ưu tiên cao nhất)
     const job = extractJobFromWebhook(body);
     if (job) {
-      await processJob11053Atct(job);
-      return res.json({
+      const jobId = String(job.id || job.job_id || "unknown");
+      console.log(`[11053-WEBHOOK] ✅ Found FULL JOB in payload. ID: ${jobId}`);
+      
+      const result = await processJob11053Atct(job);
+      console.log(`[11053-WEBHOOK] Process Result:`, result);
+      
+      return res.status(200).json({
         ok: true,
         mode: "job-in-payload",
-        job_id: job.id || job.job_id || null,
+        job_id: jobId,
+        action: result
       });
     }
 
-    // 2) Nếu webhook chỉ gửi job_id → tự fetch detail từ Base
+    // 2) Nếu không có Full Job, lấy ID và gọi API Fetch
     const jobId = extractJobIdFromWebhook(body);
-    if (!jobId) {
-      return res
-        .status(400)
-        .json({ ok: false, error: "No job or job_id in webhook payload" });
+    if (jobId) {
+      console.log(`[11053-WEBHOOK] ⚠️ Found ID only: ${jobId}. Fetching details...`);
+      
+      try {
+        const jobDetail = await fetchJobDetailAtct(jobId);
+        console.log(`[11053-WEBHOOK] Fetch success.`);
+        
+        const result = await processJob11053Atct(jobDetail);
+        
+        return res.status(200).json({
+          ok: true,
+          mode: "fetch-job",
+          job_id: jobId,
+          action: result
+        });
+      } catch (fetchErr: any) {
+         console.error(`[11053-WEBHOOK] ❌ Fetch failed: ${fetchErr.message}`);
+         return res.status(200).json({ ok: false, error: "Fetch detail failed", details: fetchErr.message });
+      }
     }
 
-    console.log("[11053-ATCT-webhook] fetching detail for job:", jobId);
-    const jobDetail = await fetchJobDetailAtct(jobId);
-    await processJob11053Atct(jobDetail);
+    console.log(`[11053-WEBHOOK] ❓ No Job data found. Ignored.`);
+    return res.status(200).json({ ok: true, msg: "ignored" });
 
-    return res.json({
-      ok: true,
-      mode: "fetch-job",
-      job_id: jobId,
-    });
   } catch (err: any) {
-    console.error("[11053-ATCT-webhook] error:", err);
+    console.error("[11053-WEBHOOK] CRITICAL ERROR:", err);
     return res.status(500).json({
       ok: false,
-      error: err?.message || "Unknown error",
+      error: err?.message || String(err),
     });
   }
 }
