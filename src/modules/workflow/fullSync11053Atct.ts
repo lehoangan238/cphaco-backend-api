@@ -2,6 +2,10 @@
  * BASE Workflow 11053 → Neon (workflow_job_atct_min)
  * - Chỉ sync các job CHƯA HOÀN THÀNH, CHƯA THẤT BẠI
  *   (bỏ qua: Hoàn thành, Thất bại/Hủy)
+ * - Lấy:
+ *   + ĐỀ NGHỊ → ceremony_type ("AN TÁNG", "CẢI TÁNG", ...)
+ *   + Vị trí / Họ tên / Năm sinh / Mất lúc / Nhằm ngày / Động quan lúc
+ *   + age_phrase: lấy thẳng từ field "Hưởng dương" trong title
  ************************************************************/
 
 import fetch from "node-fetch";
@@ -126,6 +130,79 @@ function parseTitleToMap(title: string | undefined): Record<string, string> {
   return result;
 }
 
+/* ───────── Helpers cho loại lễ (AN TÁNG / CẢI TÁNG) ───────── */
+
+function normalizeCeremonyType(raw: string | undefined): string | null {
+  if (!raw) return null;
+  const s = raw
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") // bỏ dấu
+    .trim();
+
+  if (s.includes("cai tang")) return "CẢI TÁNG";
+  if (s.includes("an tang")) return "AN TÁNG";
+
+  // nếu không bắt được thì trả lại text gốc (giữ nguyên để hiển thị)
+  return raw.trim() || null;
+}
+
+/** Map 1 job Base → 1 record để upsert vào DB */
+function mapJobToAtctRow(job: BaseJob) {
+  const titleMap = parseTitleToMap(job.title);
+
+  // ĐỀ NGHỊ: AN TÁNG / CẢI TÁNG
+  const request_raw =
+    titleMap["ĐỀ NGHỊ"] || titleMap["Đề nghị"] || titleMap["Đề Nghị"];
+  const ceremony_type = normalizeCeremonyType(request_raw);
+
+  // Hưởng dương / Hưởng thọ: lấy thẳng từ field "Hưởng dương"
+  const age_phrase_raw =
+    titleMap["Hưởng dương"] ||
+    titleMap["HƯỞNG DƯƠNG"] ||
+    titleMap["Hưởng Dương"] ||
+    titleMap["Hưởng thọ"] ||
+    titleMap["HƯỞNG THỌ"] ||
+    titleMap["Hưởng Thọ"];
+
+  const age_phrase = age_phrase_raw ? age_phrase_raw.trim() : null;
+
+  const position_khu = titleMap["Vị trí (Khu)"];
+  const position_tieukhu = titleMap["Tiểu khu"];
+  const position_tieukhu_no = titleMap["Vị trí(Tiểu khu)"];
+  const position_row = titleMap["Vị trí (Hàng)"];
+  const position_index = titleMap["Vị trí(Stt)"];
+  const deceased_name = titleMap["Họ tên người mất"];
+  const deceased_birth_year = Number(titleMap["Năm sinh"]) || null;
+  const time_of_death_raw = titleMap["Mất lúc"];
+  const lunar_date = titleMap["Nhằm ngày"];
+  const time_of_funeral_raw = titleMap["Động quan lúc"];
+  const departure_place = titleMap["Xuất phát từ"];
+
+  const time_of_death = parseVnDateTime(time_of_death_raw);
+  const time_of_funeral = parseVnDateTime(time_of_funeral_raw);
+
+  return {
+    workflow_id: WORKFLOW_ID,
+    job_id: String(job.id),
+
+    ceremony_type: ceremony_type || null, // AN TÁNG / CẢI TÁNG
+    age_phrase: age_phrase || null,       // lấy raw từ "Hưởng dương"
+
+    position_khu: position_khu || null,
+    position_tieukhu: position_tieukhu || null,
+    position_tieukhu_no: position_tieukhu_no || null,
+    position_row: position_row || null,
+    position_index: position_index || null,
+    deceased_name: deceased_name || null,
+    deceased_birth_year,
+    time_of_death,
+    lunar_date: lunar_date || null,
+    time_of_funeral,
+    departure_place: departure_place || null,
+  };
+}
+
 /** Parse "27/11/2025 09:39" → ISO (cho timestamptz) */
 function parseVnDateTime(input: any): string | null {
   if (!input) return null;
@@ -149,42 +226,6 @@ function parseVnDateTime(input: any): string | null {
 
   const iso = new Date(Date.UTC(y, m - 1, d, hh - 7, mm)).toISOString();
   return iso;
-}
-
-/** Map 1 job Base → 1 record để upsert vào DB */
-function mapJobToAtctRow(job: BaseJob) {
-  const titleMap = parseTitleToMap(job.title);
-
-  const position_khu        = titleMap["Vị trí (Khu)"];
-  const position_tieukhu    = titleMap["Tiểu khu"];
-  const position_tieukhu_no = titleMap["Vị trí(Tiểu khu)"];
-  const position_row        = titleMap["Vị trí (Hàng)"];
-  const position_index      = titleMap["Vị trí(Stt)"];
-  const deceased_name       = titleMap["Họ tên người mất"];
-  const deceased_birth_year = Number(titleMap["Năm sinh"]) || null;
-  const time_of_death_raw   = titleMap["Mất lúc"];
-  const lunar_date          = titleMap["Nhằm ngày"];
-  const time_of_funeral_raw = titleMap["Động quan lúc"];
-  const departure_place     = titleMap["Xuất phát từ"];
-
-  const time_of_death   = parseVnDateTime(time_of_death_raw);
-  const time_of_funeral = parseVnDateTime(time_of_funeral_raw);
-
-  return {
-    workflow_id: WORKFLOW_ID,
-    job_id: String(job.id),
-    position_khu: position_khu || null,
-    position_tieukhu: position_tieukhu || null,
-    position_tieukhu_no: position_tieukhu_no || null,
-    position_row: position_row || null,
-    position_index: position_index || null,
-    deceased_name: deceased_name || null,
-    deceased_birth_year,
-    time_of_death,
-    lunar_date: lunar_date || null,
-    time_of_funeral,
-    departure_place: departure_place || null,
-  };
 }
 
 /** Gọi API Base – lấy 1 page job của workflow (giống Postman: form-urlencoded) */
@@ -236,23 +277,28 @@ async function upsertAtctRow(row: ReturnType<typeof mapJobToAtctRow>) {
   const sql = `
     INSERT INTO workflow_job_atct_min (
       workflow_id, job_id,
+      ceremony_type,
       position_khu, position_tieukhu, position_tieukhu_no,
       position_row, position_index,
       deceased_name, deceased_birth_year,
+      age_phrase,
       time_of_death, lunar_date, time_of_funeral,
       departure_place,
       updated_at
     ) VALUES (
       $1, $2,
-      $3, $4, $5,
-      $6, $7,
-      $8, $9,
-      $10, $11, $12,
-      $13,
+      $3,
+      $4, $5, $6,
+      $7, $8,
+      $9, $10,
+      $11,
+      $12, $13, $14,
+      $15,
       NOW()
     )
     ON CONFLICT (workflow_id, job_id)
     DO UPDATE SET
+      ceremony_type       = EXCLUDED.ceremony_type,
       position_khu        = EXCLUDED.position_khu,
       position_tieukhu    = EXCLUDED.position_tieukhu,
       position_tieukhu_no = EXCLUDED.position_tieukhu_no,
@@ -260,6 +306,7 @@ async function upsertAtctRow(row: ReturnType<typeof mapJobToAtctRow>) {
       position_index      = EXCLUDED.position_index,
       deceased_name       = EXCLUDED.deceased_name,
       deceased_birth_year = EXCLUDED.deceased_birth_year,
+      age_phrase          = EXCLUDED.age_phrase,
       time_of_death       = EXCLUDED.time_of_death,
       lunar_date          = EXCLUDED.lunar_date,
       time_of_funeral     = EXCLUDED.time_of_funeral,
@@ -270,6 +317,7 @@ async function upsertAtctRow(row: ReturnType<typeof mapJobToAtctRow>) {
   const params = [
     row.workflow_id,
     row.job_id,
+    row.ceremony_type,
     row.position_khu,
     row.position_tieukhu,
     row.position_tieukhu_no,
@@ -277,6 +325,7 @@ async function upsertAtctRow(row: ReturnType<typeof mapJobToAtctRow>) {
     row.position_index,
     row.deceased_name,
     row.deceased_birth_year,
+    row.age_phrase,
     row.time_of_death,
     row.lunar_date,
     row.time_of_funeral,
